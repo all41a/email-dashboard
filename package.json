@@ -1,18 +1,17 @@
 {
-  "name": "personal-email-dashboard",
+  "name": "physician-dashboard",
   "version": "1.0.0",
-  "description": "Personal email dashboard - unified inbox across Gmail, Outlook, and Yahoo with smart prioritization, spam declutter, categorization, VIP lists, and draft approval workflow.",
+  "description": "Personal dashboard for physicians: email triage, calendar, finances, and availability scheduling. Runs locally, accessible from any device on your WiFi.",
   "main": "server.js",
-  "type": "commonjs",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js"
   },
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=18"
   },
   "dependencies": {
-    "express": "^4.19.2"
-  },
-  "license": "MIT"
+    "better-sqlite3": "^11.5.0",
+    "express": "^4.21.0"
+  }
 }
