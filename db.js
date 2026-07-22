@@ -97,7 +97,57 @@ CREATE TABLE IF NOT EXISTS spam_log (
   from_email TEXT,
   timestamp TEXT DEFAULT (datetime('now'))
 );
+
+-- Special folders (tree structure, e.g. Amazon > Purchase / Returns)
+CREATE TABLE IF NOT EXISTS folders (
+  id TEXT PRIMARY KEY,
+  name TEXT,
+  parent_folder_id TEXT REFERENCES folders(id),
+  icon TEXT,                         -- amazon | purchase | returns | ...
+  auto_rule TEXT,                    -- amazon_purchase | amazon_return | null
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Email <-> folder assignments (manual assignments override auto-routing)
+CREATE TABLE IF NOT EXISTS email_folders (
+  email_id TEXT REFERENCES emails(id) ON DELETE CASCADE,
+  folder_id TEXT REFERENCES folders(id) ON DELETE CASCADE,
+  assigned_by TEXT DEFAULT 'auto',   -- auto | manual
+  assigned_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (email_id, folder_id)
+);
+
+-- Notification ledger: which emails the user has been alerted about
+CREATE TABLE IF NOT EXISTS notifications_sent (
+  id TEXT PRIMARY KEY,
+  email_id TEXT REFERENCES emails(id) ON DELETE CASCADE,
+  notification_type TEXT,            -- dashboard | browser | digest
+  sent_at TEXT DEFAULT (datetime('now')),
+  dismissed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_notif_email ON notifications_sent(email_id, notification_type);
+
+-- Hourly sweep audit log
+CREATE TABLE IF NOT EXISTS sweep_log (
+  id TEXT PRIMARY KEY,
+  sweep_time TEXT DEFAULT (datetime('now')),
+  emails_checked INTEGER,
+  important_found INTEGER,
+  notifications_sent INTEGER
+);
+
+-- Browser push notification subscriptions
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id TEXT PRIMARY KEY,
+  subscription TEXT UNIQUE,          -- JSON of the PushSubscription (or 'local' marker)
+  created_at TEXT DEFAULT (datetime('now'))
+);
 `);
+
+// Column migrations for databases created before the importance feature
+const emailCols = db.prepare('PRAGMA table_info(emails)').all().map(c => c.name);
+if (!emailCols.includes('important')) db.exec("ALTER TABLE emails ADD COLUMN important INTEGER DEFAULT 0");
+if (!emailCols.includes('important_types')) db.exec("ALTER TABLE emails ADD COLUMN important_types TEXT DEFAULT '[]'");
 
 // ------------------------------------------------- smart detection helpers
 const ACTION_KEYWORDS = ['bill', 'invoice', 'tax', 'payment due', 'statement', 'refund', 'irs', 'past due', 'amount due', 'w-2', '1099'];
@@ -124,6 +174,83 @@ function detectCategory(subject, body, fromEmail, hasUnsubscribe) {
   if (/newsletter|digest|news@|crew@|alerts@/.test(from)) return 'newsletters';
   if (hasUnsubscribe) return 'newsletters'; // bulk sender with unsubscribe header
   return 'personal';
+}
+
+// --------------------------------------------- importance detection (sweep)
+// "Important" = bills, tax, time-sensitive, VIP senders, action items.
+const IMPORTANT_RULES = [
+  { type: 'bill', kw: ['invoice', 'payment due', 'bill is ready', 'your bill', 'statement', 'amount due', 'past due', 'premium', 'minimum payment'] },
+  { type: 'tax', kw: ['tax', '1099', 'w-2', 'refund', 'irs'] },
+  { type: 'urgent', kw: ['deadline', 'urgent', 'asap', 'expires', 'expiring', 'limited time', 'final notice', 'immediately', 'time-sensitive'] },
+  { type: 'action', kw: ['requires action', 'action required', 'action needed', 'approval needed', 'needs your approval', 'decision', 'please confirm', 'must be completed', 'verify'] },
+];
+
+// Returns keyword-driven importance types (vip is added at query time from vip_list)
+function detectImportantTypes(subject, body) {
+  const text = `${subject || ''} ${body || ''}`.toLowerCase();
+  return IMPORTANT_RULES.filter(r => r.kw.some(k => text.includes(k))).map(r => r.type);
+}
+
+// ------------------------------------------------- Amazon folder routing
+const FOLDER_IDS = { amazon: 'folder-amazon', purchase: 'folder-amazon-purchase', returns: 'folder-amazon-returns' };
+
+const AMAZON_RETURN_KW = ['return request', 'return label', 'refund', 'return status', 'return received', 'your return', 'item you returned', 'drop off your return', 'return authoriz'];
+const AMAZON_PURCHASE_KW = ['order confirmation', 'order confirmed', 'your order', 'has shipped', 'shipping', 'tracking', 'out for delivery', 'delivered', 'arriving', 'delivery', 'dispatched'];
+
+// Strict domain check: matches amazon.com / amazon.co.uk / marketplace.amazon.com,
+// but NOT lookalikes such as amazon.phishing.net or notamazon.com.
+const isAmazonEmail = (fromEmail) =>
+  /@(?:[a-z0-9-]+\.)*amazon\.(?:com|ca|de|es|fr|it|nl|in|com\.(?:mx|br|au)|co\.(?:uk|jp))$/i.test((fromEmail || '').trim());
+
+// Returns 'amazon_return' | 'amazon_purchase' | null. Returns keywords win
+// over purchase keywords (a refund email also mentions the original order).
+function classifyAmazon(subject, body) {
+  const text = `${subject || ''} ${body || ''}`.toLowerCase();
+  if (AMAZON_RETURN_KW.some(k => text.includes(k))) return 'amazon_return';
+  if (AMAZON_PURCHASE_KW.some(k => text.includes(k))) return 'amazon_purchase';
+  return 'amazon_purchase'; // default: any other Amazon mail files under Purchase
+}
+
+// Auto-assign an email to the right Amazon subfolder. Skips emails that were
+// manually assigned (manual override wins) or already routed.
+function routeAmazonEmail(email) {
+  if (!isAmazonEmail(email.from_email)) return null;
+  const existing = db.prepare(`SELECT folder_id, assigned_by FROM email_folders
+    WHERE email_id = ? AND folder_id IN (?, ?)`).all(email.id, FOLDER_IDS.purchase, FOLDER_IDS.returns);
+  if (existing.length) return null;
+  const rule = classifyAmazon(email.subject, email.body_full || email.body_preview);
+  const folderId = rule === 'amazon_return' ? FOLDER_IDS.returns : FOLDER_IDS.purchase;
+  db.prepare(`INSERT OR IGNORE INTO email_folders (email_id, folder_id, assigned_by) VALUES (?, ?, 'auto')`)
+    .run(email.id, folderId);
+  return folderId;
+}
+
+// ------------------------------------------------- shared email insertion
+// Inserts one email row, computing category / action / importance, then
+// auto-routes Amazon mail. Used by seeding and the hourly sweeper.
+function insertEmail(e) {
+  const id = e.id || uid();
+  const att = e.att || [];
+  const types = [...new Set(att.map(a => a.type))];
+  const action = e.action_required ?? (detectActionRequired(e.subject, e.body) && !e.spam ? 1 : 0);
+  const category = e.spam ? null : (e.cat || detectCategory(e.subject, e.body, e.from_email, !!e.unsub));
+  const importantTypes = e.spam ? [] : detectImportantTypes(e.subject, e.body);
+  db.prepare(`INSERT INTO emails
+    (id, account_id, subject, from_email, from_name, to_email, body_preview, body_full, date,
+     is_read, is_starred, is_spam, category, priority, action_required, has_attachment,
+     attachment_types, attachments, list_unsubscribe, message_id, thread_id, important, important_types)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    id, e.acc, e.subject, e.from_email, e.from_name, e.to_email || '',
+    e.preview, e.body, e.date,
+    e.read ?? 0, e.starred ?? 0, e.spam ? 1 : 0, category,
+    action ? 'high' : 'normal', action,
+    att.length ? 1 : 0, JSON.stringify(types),
+    JSON.stringify(att.map((a, i) => ({ ...a, size: a.size || 40000 + (i * 13791) % 900000 }))),
+    e.unsub || null, e.message_id || `<msg-${id}@demo.local>`, e.thread_id || `thread-${id}`,
+    importantTypes.length ? 1 : 0, JSON.stringify(importantTypes)
+  );
+  routeAmazonEmail({ id, from_email: e.from_email, subject: e.subject, body_full: e.body });
+  return id;
 }
 
 // ------------------------------------------------------------------ seed
@@ -272,4 +399,78 @@ function refreshCategoryCounts() {
     (SELECT COUNT(*) FROM emails e WHERE e.category = categories.name AND e.is_spam = 0 AND e.is_deleted = 0 AND e.is_archived = 0)`);
 }
 
-module.exports = { db, uid, seedIfEmpty, detectActionRequired, detectCategory, refreshCategoryCounts, ACTION_KEYWORDS };
+// ------------------------------------ folders + Amazon demo data (idempotent)
+// Runs on every startup: creates the Amazon folder tree, seeds Amazon demo
+// emails once, and backfills importance/routing for pre-existing databases.
+function ensureFoldersAndAmazon() {
+  const insFolder = db.prepare('INSERT OR IGNORE INTO folders (id, name, parent_folder_id, icon, auto_rule) VALUES (?, ?, ?, ?, ?)');
+  insFolder.run(FOLDER_IDS.amazon, 'Amazon', null, 'amazon', null);
+  insFolder.run(FOLDER_IDS.purchase, 'Purchase', FOLDER_IDS.amazon, 'purchase', 'amazon_purchase');
+  insFolder.run(FOLDER_IDS.returns, 'Returns', FOLDER_IDS.amazon, 'returns', 'amazon_return');
+
+  // Seed Amazon demo emails exactly once (message_id acts as the marker)
+  const hasAmz = db.prepare("SELECT COUNT(*) c FROM emails WHERE message_id LIKE '<amz-%'").get().c;
+  if (!hasAmz) {
+    const now = Date.now();
+    const at = (daysAgo, h) => new Date(now - daysAgo * 86400e3 - h * 3600e3).toISOString();
+    const amz = [
+      // --- Purchases ---
+      { acc: 'acc-gmail-1', from_name: 'Amazon.com', from_email: 'auto-confirm@amazon.com',
+        subject: 'Your Amazon.com order #112-4478921-6612233 has been confirmed',
+        preview: 'Order confirmation: Anker 65W USB-C charger and HDMI cable. Total $52.90.',
+        body: 'Hello Anesh,\n\nThank you for your order.\n\nOrder #112-4478921-6612233\n- Anker 65W USB-C GaN charger: $39.99\n- 6ft HDMI 2.1 cable: $12.91\n\nTotal: $52.90 charged to Visa ****4421.\nArriving: Wednesday, July 22.\n\nView or manage your order in Your Orders.', daysAgo: 0, h: 3, read: 0, att: [{ name: 'order-invoice.pdf', type: 'pdf' }] },
+      { acc: 'acc-gmail-1', from_name: 'Amazon.com', from_email: 'shipment-tracking@amazon.com',
+        subject: 'Shipped: your package with Kindle Paperwhite is on the way',
+        preview: 'Tracking number TBA309442218871. Arriving tomorrow by 8pm.',
+        body: 'Your package has shipped.\n\nKindle Paperwhite (16 GB)\nTracking number: TBA309442218871\nCarrier: Amazon Logistics\nArriving: tomorrow by 8pm.\n\nTrack your package in the Amazon app.', daysAgo: 1, h: 5, read: 0 },
+      { acc: 'acc-gmail-1', from_name: 'Amazon.com', from_email: 'order-update@amazon.com',
+        subject: 'Delivered: your package was left near the front door',
+        preview: 'Your package with Owala water bottle was delivered. See delivery photo.',
+        body: 'Your package was delivered.\n\nOwala FreeSip 32oz water bottle\nDelivered: today, 2:14pm - left near the front door.\n\nA delivery photo is available in Your Orders. How was your delivery?', daysAgo: 2, h: 2, read: 1 },
+      // --- Returns ---
+      { acc: 'acc-gmail-1', from_name: 'Amazon.com', from_email: 'return-confirmation@amazon.com',
+        subject: 'Your return request has been received - Levi\'s 511 jeans',
+        preview: 'We received your return request. Drop off your return by August 3.',
+        body: 'Hello Anesh,\n\nWe received your return request for:\nLevi\'s 511 Slim Fit jeans (32x32) - $59.50\n\nDrop off your return at any UPS location by August 3. No box or label needed - show the QR code below.\n\nYour refund will be issued once the item is received.', daysAgo: 1, h: 8, read: 0 },
+      { acc: 'acc-gmail-1', from_name: 'Amazon.com', from_email: 'return-confirmation@amazon.com',
+        subject: 'Your return label for Sony WH-CH720 headphones',
+        preview: 'Print your return label and ship the item back by July 30.',
+        body: 'Your return label is ready.\n\nItem: Sony WH-CH720N wireless headphones - $128.00\nReason: item defective\n\nPrint the attached return label and ship via UPS by July 30. Refund method: original payment card.', daysAgo: 3, h: 4, read: 1, att: [{ name: 'return-label.pdf', type: 'pdf' }] },
+      { acc: 'acc-gmail-1', from_name: 'Amazon.com', from_email: 'refunds@amazon.com',
+        subject: 'Your refund of $34.99 has been issued',
+        preview: 'Refund issued for the item you returned: desk lamp. Allow 3-5 business days.',
+        body: 'Hello Anesh,\n\nWe processed your refund for the item you returned:\nLED desk lamp with wireless charging - $34.99\n\nRefund issued to Visa ****4421. Please allow 3-5 business days for it to appear on your statement.\n\nReturn status: complete.', daysAgo: 4, h: 6, read: 0 },
+      { acc: 'acc-gmail-1', from_name: 'Amazon.com', from_email: 'return-status@amazon.com',
+        subject: 'Return status update: we received your item',
+        preview: 'Your return was received at our facility. Refund is being processed.',
+        body: 'Return status update\n\nItem: USB microphone arm stand - $23.99\nStatus: received at our returns facility.\n\nYour refund is being processed and should be issued within 2 business days.', daysAgo: 5, h: 3, read: 1 },
+    ];
+    amz.forEach((e, i) => insertEmail({
+      ...e, to_email: 'anesh.personal@gmail.com',
+      date: at(e.daysAgo, e.h),
+      message_id: `<amz-${i + 1}@demo.local>`, thread_id: `thread-amz-${i + 1}`,
+    }));
+    console.log(`Seeded ${amz.length} Amazon demo emails.`);
+  }
+
+  // Backfill importance for rows inserted before the feature existed
+  const upd = db.prepare('UPDATE emails SET important = ?, important_types = ? WHERE id = ?');
+  for (const row of db.prepare("SELECT id, subject, body_full, is_spam FROM emails WHERE important_types IS NULL OR important_types = '[]'").all()) {
+    const types = row.is_spam ? [] : detectImportantTypes(row.subject, row.body_full);
+    if (types.length) upd.run(1, JSON.stringify(types), row.id);
+  }
+
+  // Backfill Amazon routing for any unrouted Amazon emails
+  for (const row of db.prepare(`SELECT id, from_email, subject, body_full FROM emails
+      WHERE from_email LIKE '%amazon.%' AND is_deleted = 0
+      AND id NOT IN (SELECT email_id FROM email_folders)`).all()) {
+    routeAmazonEmail(row);
+  }
+  refreshCategoryCounts();
+}
+
+module.exports = {
+  db, uid, seedIfEmpty, detectActionRequired, detectCategory, refreshCategoryCounts, ACTION_KEYWORDS,
+  detectImportantTypes, IMPORTANT_RULES, isAmazonEmail, classifyAmazon, routeAmazonEmail,
+  insertEmail, ensureFoldersAndAmazon, FOLDER_IDS,
+};

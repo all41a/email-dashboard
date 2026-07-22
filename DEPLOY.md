@@ -29,8 +29,8 @@ Follow every step in order. Do not skip steps.
 ### Step 3: Upload the app files by drag and drop
 
 1. You are now looking at your new repository page. Click the **"Add file"** button (near the top right, next to the green "Code" button), then click **"Upload files"** from the dropdown.
-2. Open **Finder** on your Mac and go to the `email-dashboard` folder on your computer.
-3. Open the folder so you can see the files inside it (`package.json`, `server.js`, `db.js`, `railway.toml`, and the `public` folder).
+2. Open **Finder** on your Mac and go to the `email-dashboard-complete` folder on your computer.
+3. Open the folder so you can see the files inside it (`package.json`, `server.js`, `db.js`, `railway.toml`, and the `public` and `lib` folders).
 4. Select **everything inside the folder**: click once inside the Finder window, then press **Cmd+A** (select all).
 5. **Drag all the selected items** from Finder into the big dashed box on the GitHub page that says "Drag files here to add them to your repository."
 6. Wait until the file list appears below the box. You should see at least these names listed:
@@ -38,12 +38,13 @@ Follow every step in order. Do not skip steps.
    - `server.js`
    - `db.js`
    - `railway.toml`
+   - `lib/sweeper.js` (**required** — the app won't start without it)
    - `public/index.html`, `public/app.js`, `public/styles.css`
 7. Scroll down and click the green **"Commit changes"** button.
 8. Wait a few seconds. Your repository page now shows all the files.
 
 **Common mistakes to avoid in this step:**
-- Do NOT drag the `email-dashboard` folder itself. Drag the files **inside** it. (If you drag the whole folder, GitHub nests everything one level deep and Railway won't find `package.json`.)
+- Do NOT drag the `email-dashboard-complete` folder itself. Drag the files **inside** it. (If you drag the whole folder, GitHub nests everything one level deep and Railway won't find `package.json`.)
 - If you see a folder called `node_modules` in Finder, do NOT upload it. (You probably won't see one — that's normal.)
 - Files starting with a dot (like `.env.example`) may be invisible in Finder and won't get dragged. **That is fine.** They are not needed for deployment.
 
@@ -116,7 +117,7 @@ Click around. Nothing you do in demo mode affects any real email account.
 ## One-page cheat sheet
 
 1. github.com/new → name it `email-dashboard` → check "Add a README" → Create.
-2. Add file → Upload files → drag the **contents** of the email-dashboard folder in → Commit changes.
+2. Add file → Upload files → drag the **contents** of the email-dashboard-complete folder in (including the `lib` and `public` folders) → Commit changes.
 3. railway.com → Login with GitHub.
 4. + New → Deploy from GitHub repo → pick `email-dashboard` → Deploy.
 5. Click the service → Settings → Networking → **Generate Domain**.

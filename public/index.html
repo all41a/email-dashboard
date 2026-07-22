@@ -2,41 +2,17 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#0b1220" />
-  <title>Physician Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>Mail Deck - Personal Email Dashboard</title>
   <link rel="stylesheet" href="/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%234A9EFF'/><path d='M20 32 L50 55 L80 32 M20 32 h60 v40 h-60 z' stroke='%230F0F0F' stroke-width='7' fill='none'/></svg>" />
+  <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/htm@3.1.1/dist/htm.umd.js"></script>
 </head>
 <body>
-  <header class="topbar">
-    <div class="topbar-inner">
-      <div class="brand">
-        <span class="brand-dot"></span>
-        <span>Physician<strong>Dash</strong></span>
-      </div>
-      <div class="topbar-date" id="topbarDate"></div>
-    </div>
-  </header>
-
-  <main id="view" class="view"></main>
-
-  <nav class="tabbar" aria-label="Main navigation">
-    <button class="tab active" data-tab="inbox">
-      <span class="tab-icon">&#9993;</span><span class="tab-label">Inbox</span>
-      <span class="tab-badge" id="inboxBadge" hidden></span>
-    </button>
-    <button class="tab" data-tab="calendar">
-      <span class="tab-icon">&#128197;</span><span class="tab-label">Calendar</span>
-    </button>
-    <button class="tab" data-tab="finance">
-      <span class="tab-icon">&#128176;</span><span class="tab-label">Finances</span>
-    </button>
-    <button class="tab" data-tab="availability">
-      <span class="tab-icon">&#9200;</span><span class="tab-label">Shifts</span>
-    </button>
-  </nav>
-
-  <div id="toast" class="toast" hidden></div>
+  <div id="root"></div>
   <script src="/app.js"></script>
 </body>
 </html>
